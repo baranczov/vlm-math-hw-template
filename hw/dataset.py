@@ -33,10 +33,7 @@ class MathVQASample:
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    """Load a jsonl file.
-
-    This helper is provided; you may use or replace it.
-    """
+    """Load a jsonl file."""
     path = Path(path)
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
@@ -63,14 +60,6 @@ class MathVQADataset(Dataset[MathVQASample]):
 
     Expected manifest fields:
         id, split, image, question, options, answer, subject, source(optional)
-
-    TODO for students:
-        - read manifest;
-        - filter by split;
-        - support max_samples;
-        - resolve image paths relative to manifest directory;
-        - open images as RGB PIL.Image;
-        - return MathVQASample.
     """
 
     def __init__(
@@ -84,14 +73,32 @@ class MathVQADataset(Dataset[MathVQASample]):
         self.split = split
         self.max_samples = max_samples
 
-        # TODO: implement loading/filtering.
-        # Hint: use load_jsonl(self.manifest_path).
-        raise NotImplementedError("Implement MathVQADataset.__init__")
+        raw_rows = load_jsonl(self.manifest_path)
+        
+        self._data = [row for row in raw_rows if row.get("split") == self.split]
+        
+        if self.max_samples is not None:
+            self._data = self._data[: self.max_samples]
 
     def __len__(self) -> int:
-        # TODO: return number of filtered rows.
-        raise NotImplementedError("Implement MathVQADataset.__len__")
+        return len(self._data)
 
     def __getitem__(self, idx: int) -> MathVQASample:
-        # TODO: construct and return MathVQASample.
-        raise NotImplementedError("Implement MathVQADataset.__getitem__")
+        item = self._data[idx]
+        
+        image_path = self.root / item["image"]
+        img = Image.open(image_path).convert("RGB")
+        
+        clean_question = sanitize_question(str(item.get("question", "")))
+        
+        options_list = [str(opt) for opt in item.get("options", [])]
+
+        return MathVQASample(
+            id=str(item.get("id", idx)),
+            image=img,
+            question=clean_question,
+            options=options_list,
+            answer=str(item.get("answer", "")),
+            subject=str(item.get("subject", "unknown")),
+            source=str(item.get("source", "unknown")),
+        )

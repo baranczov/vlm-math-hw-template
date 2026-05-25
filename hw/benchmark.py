@@ -6,9 +6,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 from hw.constants import CHOICES
+from hw.dataset import MathVQADataset
+from hw.train import _move_batch, _resolve_device, build_components
 
 
 def normalize_text(text: str) -> str:
@@ -19,16 +22,21 @@ def normalize_text(text: str) -> str:
 
 
 def parse_mc_answer(text: str, choices: tuple[str, ...] = CHOICES) -> str | None:
-    """Extract multiple-choice answer letter from model output.
-
-    TODO:
-        Handle cases like:
-            "A"
-            "(B)"
-            "Answer: C"
-            "The correct answer is D."
-    """
-    raise NotImplementedError("Implement parse_mc_answer")
+    """Extract multiple-choice answer letter from model output."""
+    cleaned = normalize_text(text)
+    choice_chars = "".join(choices).lower()
+    
+    trigger_pattern = rf"(?:answer|ответ|correct|правильный|выбор)[:\s\-]*\(?([{choice_chars}])\)??"
+    match = re.search(trigger_pattern, cleaned)
+    if match:
+        return match.group(1).upper()
+        
+    fallback_pattern = rf"\b\(?([{choice_chars}])\)?\b"
+    match = re.search(fallback_pattern, cleaned)
+    if match:
+        return match.group(1).upper()
+        
+    return None
 
 
 def build_benchmark_prompt(question: str, options: list[str]) -> str:
@@ -61,17 +69,69 @@ def compute_accuracy(rows: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def run_benchmark(config: dict[str, Any], toy: bool = False) -> dict[str, float]:
-    """Run evaluation loop.
+    """Run evaluation loop."""
+    data_config = config.get("data", {})
+    inference_config = config.get("inference", {})
+    
+    manifest_path = data_config.get("eval_manifest")
+    split = data_config.get("split", "dev")
+    if toy:
+        manifest_path = "assets/toy_math_vqa/manifest.jsonl"
+        split = "dev"
 
-    TODO:
-        - load eval dataset;
-        - build prompts;
-        - call model.generate;
-        - parse answers;
-        - write predictions if output_path is provided;
-        - return metrics.
-    """
-    raise NotImplementedError("Implement benchmark loop")
+    dataset = MathVQADataset(
+        manifest_path=manifest_path,
+        split=str(split),
+        max_samples=data_config.get("max_samples"),
+    )
+    
+    tokenizer, model, processor = build_components(config)
+    device = _resolve_device(str(inference_config.get("device", "cpu")))
+    
+    model.to(device)
+    model.eval()
+
+    results = []
+    max_tokens = int(inference_config.get("max_new_tokens", 16))
+    do_sample = bool(inference_config.get("do_sample", False))
+
+    for sample in dataset:
+        gold_answer = sample.answer
+        object.__setattr__(sample, "answer", "") 
+        
+        features = processor(sample)
+        batch = processor.collate([features])
+        batch = _move_batch(batch, device)
+        
+        with torch.no_grad():
+            output_ids = model.generate(
+                batch,
+                max_new_tokens=max_tokens,
+                do_sample=do_sample,
+            )
+            
+        generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        pred_letter = parse_mc_answer(generated_text)
+        
+        results.append({
+            "id": sample.id,
+            "question": sample.question,
+            "prompt": build_benchmark_prompt(sample.question, sample.options),
+            "prediction": pred_letter,
+            "raw_output": generated_text,
+            "answer": gold_answer,
+            "subject": sample.subject,
+        })
+
+    output_path = inference_config.get("output_path")
+    if output_path:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        with out_p.open("w", encoding="utf-8") as f:
+            for item in results:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    return compute_accuracy(results)
 
 
 def main() -> None:
@@ -82,6 +142,7 @@ def main() -> None:
 
     with Path(args.config).open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+        
     metrics = run_benchmark(config, toy=args.toy)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
